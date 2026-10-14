@@ -1,0 +1,77 @@
+# The verification gate from AGENTS.md §7, run on every push to main and every
+# pull request, plus cheap checks of documented invariants (README: every module
+# ≤ 400 lines; ADR 0005: reruns are byte-identical) and a packaging smoke test:
+# the built wheel must install into a clean environment and run.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev,api]"
+
+      # Lint/type errors become PR annotations: ruff natively, mypy via a problem matcher.
+      - name: Lint
+        run: ruff check --output-format=github src tests
+
+      - name: Format
+        run: ruff format --check src tests
+
+      - name: Types
+        run: |
+          echo "::add-matcher::.github/problem-matchers/mypy.json"
+          mypy src
+
+      - name: Tests
+        run: pytest -q --cov=telemetry_pipeline --cov-report=term-missing
+
+      - name: Module size (README promises every module is at most 400 lines)
+        run: |
+          over=$(find src -name '*.py' -exec awk 'END { if (NR > 400) print FILENAME ": " NR " lines" }' {} \;)
+          if [ -n "$over" ]; then echo "$over"; exit 1; fi
+
+      - name: Determinism (ADR 0005, a rerun is byte-identical)
+        run: |
+          telemetry-pipeline run data/sample_telemetry.csv --output-root "$RUNNER_TEMP/run-a" --log-level WARNING
+          telemetry-pipeline run data/sample_telemetry.csv --output-root "$RUNNER_TEMP/run-b" --log-level WARNING
+          diff -r "$RUNNER_TEMP/run-a" "$RUNNER_TEMP/run-b"
+
+      - name: Package (wheel installs clean, console script and API extra work)
+        run: |
+          python -m pip install --quiet build
+          python -m build --outdir "$RUNNER_TEMP/dist"
+          python -m venv "$RUNNER_TEMP/pkg-venv"
+          wheel=$(ls "$RUNNER_TEMP"/dist/*.whl)
+          "$RUNNER_TEMP/pkg-venv/bin/pip" install --quiet "$wheel"
+          "$RUNNER_TEMP/pkg-venv/bin/telemetry-pipeline" --help > /dev/null
+          "$RUNNER_TEMP/pkg-venv/bin/telemetry-pipeline" run data/sample_telemetry.csv --output-root "$RUNNER_TEMP/pkg-run" --log-level WARNING
+          diff -r "$RUNNER_TEMP/run-a" "$RUNNER_TEMP/pkg-run"
+          "$RUNNER_TEMP/pkg-venv/bin/pip" install --quiet "${wheel}[api]"
+          "$RUNNER_TEMP/pkg-venv/bin/python" -c "from telemetry_pipeline.api import create_app; from telemetry_pipeline.config import PipelineSettings; create_app(PipelineSettings(api_allow_anonymous=True))"

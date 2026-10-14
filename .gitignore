@@ -1,0 +1,15 @@
+# Private documents
+building_energy_hvac_telemetry_prd.md
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+output/
+*.egg-info/
+build/
+dist/
